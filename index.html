@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Chain Reactors</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    #game-container { position: relative; }
+    #ui { position: absolute; top: 0; left: 0; width: 100%; padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; z-index: 10; }
+    #score-block { display: flex; flex-direction: column; }
+    #score-label { font: 11px/1 'Courier New', monospace; color: #555; letter-spacing: 3px; text-transform: uppercase; }
+    #score { font: bold 48px/1 'Courier New', monospace; color: #fff; text-shadow: 0 0 20px #0ff, 0 0 40px #0ff8; transition: transform 0.05s; }
+    #combo { font: bold 22px/1 'Courier New', monospace; color: #f0f; text-shadow: 0 0 15px #f0f; min-height: 28px; transition: opacity 0.3s; }
+    #combo.hidden { opacity: 0; }
+    #best-block { text-align: right; }
+    #best-label { font: 11px/1 'Courier New', monospace; color: #555; letter-spacing: 3px; text-transform: uppercase; }
+    #best { font: bold 24px/1 'Courier New', monospace; color: #888; }
+    #overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 20; }
+    #overlay h1 { font: bold 64px/1 'Courier New', monospace; color: #0ff; text-shadow: 0 0 30px #0ff, 0 0 60px #0ff; letter-spacing: 4px; margin-bottom: 12px; }
+    #overlay .sub { font: 16px/1 'Courier New', monospace; color: #888; letter-spacing: 2px; margin-bottom: 40px; }
+    #overlay .death-score { font: bold 32px/1 'Courier New', monospace; color: #fff; margin-bottom: 8px; display: none; }
+    #overlay .death-best { font: 14px/1 'Courier New', monospace; color: #f0f; margin-bottom: 40px; display: none; }
+    #start-btn { font: bold 20px/1 'Courier New', monospace; color: #0a0a0a; background: #0ff; border: none; padding: 16px 48px; cursor: pointer; letter-spacing: 3px; text-transform: uppercase; transition: all 0.1s; }
+    #start-btn:hover { background: #fff; box-shadow: 0 0 30px #0ff; transform: scale(1.05); }
+  </style>
+</head>
+<body>
+<div id="game-container">
+  <div id="ui">
+    <div id="score-block">
+      <span id="score-label">score</span>
+      <span id="score">0</span>
+      <span id="combo" class="hidden">x1</span>
+    </div>
+    <div id="best-block">
+      <span id="best-label">best</span>
+      <span id="best">0</span>
+    </div>
+  </div>
+  <div id="overlay">
+    <h1>CHAIN<br>REACTORS</h1>
+    <div class="sub">click to bomb · space to dash</div>
+    <div class="death-score" id="death-score"></div>
+    <div class="death-best" id="death-best"></div>
+    <button id="start-btn">PLAY</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let score = 0, combo = 1, comboTimer = null, best = 0;
+let bombs = [], enemies = [], particles = [], explosionQueue = [];
+let alive = false, player = null, dashCooldown = false;
+let spawnTimer = 0, spawnInterval = 180, difficulty = 0;
+let shakeFrames = 0, shakeIntensity = 0;
+
+const W = 800, H = 600;
+
+// ── Phaser Config ────────────────────────────────────────────────────────────
+const config = {
+  type: Phaser.AUTO,
+  width: W, height: H,
+  backgroundColor: '#0a0a0a',
+  parent: 'game-container',
+  physics: { default: 'matter', matter: { gravity: { y: 0 }, debug: false } },
+  scene: { preload, create, update }
+};
+
+const game = new Phaser.Game(config);
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function rand(min, max) { return Phaser.Math.Between(min, max); }
+function randF(min, max) { return Math.random() * (max - min) + min; }
+
+function setScore(v) {
+  score = v;
+  document.getElementById('score').textContent = score;
+}
+function setCombo(v) {
+  combo = v;
+  const el = document.getElementById('combo');
+  if (combo >= 2) {
+    el.textContent = 'x' + combo;
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
+}
+function triggerComboReset() {
+  clearTimeout(comboTimer);
+  comboTimer = setTimeout(() => { setCombo(1); }, 2000);
+}
+function punchScore() {
+  const el = document.getElementById('score');
+  el.style.transform = 'scale(1.3)';
+  setTimeout(() => el.style.transform = '', 80);
+}
+
+// ── Preload ──────────────────────────────────────────────────────────────────
+function preload() {
+  // Generate textures programmatically
+  const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+  // Player (glowing triangle-ish circle)
+  g.clear(); g.fillStyle(0x00ffff, 1); g.fillCircle(12, 12, 10);
+  g.generateTexture('player', 24, 24); g.clear();
+
+  // Bomb
+  g.fillStyle(0xffffff, 1); g.fillCircle(6, 6, 6);
+  g.generateTexture('bomb', 12, 12); g.clear();
+
+  // Enemy sizes: large, medium, small
+  [[0xff6600, 40], [0xff3399, 26], [0xffcc00, 14]].forEach(([color, size]) => {
+    g.clear(); g.fillStyle(color, 1); g.fillCircle(size/2, size/2, size/2 - 1);
+    g.generateTexture('enemy_' + size, size, size);
+  });
+
+  g.destroy();
+}
+
+// ── Create ───────────────────────────────────────────────────────────────────
+function create() {
+  const scene = this;
+
+  // World bounds
+  this.matter.world.setBounds(0, 0, W, H, 32);
+
+  // Player
+  player = this.matter.add.image(W/2, H/2, 'player', null, {
+    frictionAir: 0.15, restitution: 0.3, shape: { type: 'circle', radius: 10 }
+  });
+  player.setDepth(5);
+  player.setVisible(false);
+
+  // Click → place bomb
+  this.input.on('pointerdown', (ptr) => {
+    if (!alive) return;
+    spawnBomb(scene, ptr.x, ptr.y);
+  });
+
+  // Space → dash
+  this.input.keyboard.on('keydown-SPACE', () => {
+    if (!alive || dashCooldown) return;
+    dashCooldown = true;
+    const angle = Phaser.Math.Between(0, 360) * Math.PI / 180;
+    player.setVelocity(Math.cos(angle) * 18, Math.sin(angle) * 18);
+    spawnParticleBurst(scene, player.x, player.y, 0x00ffff, 8, 30);
+    setTimeout(() => dashCooldown = false, 800);
+  });
+
+  // WASD / arrows movement
+  this.cursors = this.input.keyboard.createCursorKeys();
+  this.wasd = this.input.keyboard.addKeys({ up: 'W', left: 'A', down: 'S', right: 'D' });
+
+  // Collision: enemy hits player
+  this.matter.world.on('collisionstart', (event) => {
+    if (!alive) return;
+    event.pairs.forEach(pair => {
+      const { bodyA, bodyB } = pair;
+      const labels = [bodyA.label, bodyB.label];
+      if (labels.includes('player') && labels.includes('enemy')) {
+        die(scene);
+      }
+    });
+  });
+
+  // UI button
+  document.getElementById('start-btn').onclick = () => startGame(scene);
+}
+
+// ── Update ───────────────────────────────────────────────────────────────────
+function update() {
+  if (!alive) return;
+
+  // Player movement
+  const speed = 5;
+  const vx = ((this.cursors.left.isDown || this.wasd.left.isDown) ? -speed : 0)
+            + ((this.cursors.right.isDown || this.wasd.right.isDown) ? speed : 0);
+  const vy = ((this.cursors.up.isDown || this.wasd.up.isDown) ? -speed : 0)
+            + ((this.cursors.down.isDown || this.wasd.down.isDown) ? speed : 0);
+  if (vx !== 0 || vy !== 0) player.setVelocity(vx, vy);
+
+  // Enemy body sync
+  enemies.forEach(e => {
+    if (e.sprite && e.body) {
+      e.sprite.setPosition(e.body.position.x, e.body.position.y);
+    }
+  });
+
+  // Bomb visuals sync
+  bombs.forEach(b => {
+    if (b.sprite && b.body) {
+      b.sprite.setPosition(b.body.position.x, b.body.position.y);
+      b.sprite.setAlpha(0.5 + 0.5 * Math.sin(Date.now() * 0.015));
+      b.sprite.setScale(0.8 + 0.3 * Math.sin(Date.now() * 0.012));
+    }
+  });
+
+  // Particles update
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vx *= 0.92; p.vy *= 0.92;
+    p.alpha -= p.decay;
+    p.r *= 0.93;
+    if (p.gfx) { p.gfx.clear(); p.gfx.fillStyle(p.color, p.alpha); p.gfx.fillCircle(p.x, p.y, p.r); }
+    if (p.alpha <= 0) { if (p.gfx) p.gfx.destroy(); particles.splice(i, 1); }
+  }
+
+  // Screen shake
+  if (shakeFrames > 0) {
+    this.cameras.main.setScroll(
+      randF(-shakeIntensity, shakeIntensity),
+      randF(-shakeIntensity, shakeIntensity)
+    );
+    shakeFrames--;
+    if (shakeFrames === 0) this.cameras.main.setScroll(0, 0);
+  }
+
+  // Difficulty + spawn
+  difficulty += 0.002;
+  spawnTimer++;
+  spawnInterval = Math.max(60, 180 - difficulty * 20);
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnEnemyAuto(this);
+  }
+
+  // Process chain explosions queued
+  while (explosionQueue.length > 0) {
+    const { scene, x, y } = explosionQueue.shift();
+    processExplosion(scene, x, y);
+  }
+
+  // Remove dead enemies/bombs from physics if flagged
+  enemies = enemies.filter(e => !e.dead);
+  bombs = bombs.filter(b => !b.dead);
+}
+
+// ── Game Flow ────────────────────────────────────────────────────────────────
+function startGame(scene) {
+  document.getElementById('overlay').style.display = 'none';
+  alive = true;
+  score = 0; combo = 1; difficulty = 0; spawnTimer = 0;
+  setScore(0); setCombo(1);
+
+  // Clear old
+  enemies.forEach(e => { if (e.body) scene.matter.world.remove(e.body); if (e.sprite) e.sprite.destroy(); });
+  bombs.forEach(b => { if (b.body) scene.matter.world.remove(b.body); if (b.sprite) b.sprite.destroy(); });
+  particles.forEach(p => { if (p.gfx) p.gfx.destroy(); });
+  enemies = []; bombs = []; particles = [];
+
+  player.setPosition(W/2, H/2);
+  player.setVelocity(0, 0);
+  player.setVisible(true);
+  player.body.label = 'player';
+
+  // Spawn initial enemies
+  for (let i = 0; i < 3; i++) {
+    const x = rand(80, W - 80), y = rand(80, H - 80);
+    spawnEnemy(scene, x, y, 40);
+  }
+}
+
+function die(scene) {
+  if (!alive) return;
+  alive = false;
+  player.setVisible(false);
+
+  spawnParticleBurst(scene, player.x, player.y, 0x00ffff, 20, 60);
+  shake(12, 10);
+
+  if (score > best) best = score;
+  document.getElementById('best').textContent = best;
+
+  const overlay = document.getElementById('overlay');
+  const ds = document.getElementById('death-score');
+  const db = document.getElementById('death-best');
+  ds.textContent = 'score: ' + score;
+  ds.style.display = 'block';
+  db.textContent = score >= best ? '🏆 nouveau record !' : 'best: ' + best;
+  db.style.display = 'block';
+  document.getElementById('start-btn').textContent = 'REJOUER';
+  overlay.style.display = 'flex';
+}
+
+// ── Enemies ──────────────────────────────────────────────────────────────────
+function spawnEnemy(scene, x, y, size) {
+  const textureKey = size >= 35 ? 'enemy_40' : size >= 20 ? 'enemy_26' : 'enemy_14';
+  const body = scene.matter.add.circle(x, y, size, {
+    restitution: 1.0, frictionAir: 0, friction: 0, label: 'enemy'
+  });
+
+  const speedBase = 1.5 + (40 - size) * 0.12 + difficulty * 0.3;
+  const angle = randF(0, Math.PI * 2);
+  scene.matter.body.setVelocity(body, {
+    x: Math.cos(angle) * speedBase,
+    y: Math.sin(angle) * speedBase
+  });
+
+  const sprite = scene.add.image(x, y, textureKey).setDepth(3);
+  sprite.setTint(size >= 35 ? 0xff6600 : size >= 20 ? 0xff3399 : 0xffcc00);
+
+  const e = { body, sprite, size, dead: false };
+  enemies.push(e);
+  return e;
+}
+
+function spawnEnemyAuto(scene) {
+  const side = rand(0, 3);
+  const margin = 50;
+  let x, y;
+  if (side === 0) { x = rand(margin, W - margin); y = margin; }
+  else if (side === 1) { x = rand(margin, W - margin); y = H - margin; }
+  else if (side === 2) { x = margin; y = rand(margin, H - margin); }
+  else { x = W - margin; y = rand(margin, H - margin); }
+  spawnEnemy(scene, x, y, 40);
+}
+
+function killEnemy(scene, e) {
+  if (e.dead) return;
+  e.dead = true;
+
+  const x = e.body.position.x, y = e.body.position.y;
+  const color = e.size >= 35 ? 0xff6600 : e.size >= 20 ? 0xff3399 : 0xffcc00;
+
+  // Score
+  const pts = Math.round(10 * combo);
+  setScore(score + pts);
+  setCombo(combo + 1);
+  punchScore();
+  triggerComboReset();
+
+  // Particles
+  spawnParticleBurst(scene, x, y, color, 12, e.size * 0.8);
+  shake(4, Math.min(8, e.size * 0.2));
+
+  // Split
+  if (e.size > 12) {
+    spawnEnemy(scene, x + rand(-15, 15), y + rand(-15, 15), e.size / 2);
+    spawnEnemy(scene, x + rand(-15, 15), y + rand(-15, 15), e.size / 2);
+  }
+
+  // Remove
+  scene.matter.world.remove(e.body);
+  e.sprite.destroy();
+}
+
+// ── Bombs ────────────────────────────────────────────────────────────────────
+function spawnBomb(scene, x, y) {
+  const body = scene.matter.add.circle(x, y, 6, { isStatic: true, isSensor: true, label: 'bomb' });
+  const sprite = scene.add.image(x, y, 'bomb').setDepth(4).setTint(0xff00ff);
+  const b = { body, sprite, dead: false };
+  bombs.push(b);
+
+  // Fuse timer
+  setTimeout(() => {
+    if (!b.dead) triggerBomb(scene, b);
+  }, 800);
+}
+
+function triggerBomb(scene, b) {
+  if (b.dead) return;
+  b.dead = true;
+
+  const x = b.body.position.x, y = b.body.position.y;
+
+  // Explosion ring visual
+  spawnExplosionRing(scene, x, y, 80);
+  spawnParticleBurst(scene, x, y, 0xff00ff, 16, 20);
+  shake(6, 5);
+
+  scene.matter.world.remove(b.body);
+  b.sprite.destroy();
+
+  // Detect hits
+  processExplosion(scene, x, y);
+
+  // Chain: trigger nearby bombs
+  [...bombs].forEach(other => {
+    if (!other.dead) {
+      const dx = other.body.position.x - x, dy = other.body.position.y - y;
+      if (Math.sqrt(dx*dx + dy*dy) < 80) {
+        setTimeout(() => triggerBomb(scene, other), 80);
+      }
+    }
+  });
+}
+
+function processExplosion(scene, x, y) {
+  const radius = 80;
+  [...enemies].forEach(e => {
+    if (e.dead) return;
+    const dx = e.body.position.x - x, dy = e.body.position.y - y;
+    if (Math.sqrt(dx*dx + dy*dy) < radius + e.size) {
+      killEnemy(scene, e);
+    }
+  });
+}
+
+// ── Visuals ──────────────────────────────────────────────────────────────────
+function spawnParticleBurst(scene, x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2 + randF(-0.3, 0.3);
+    const spd = randF(speed * 0.3, speed);
+    const gfx = scene.add.graphics().setDepth(6);
+    const r = randF(2, 5);
+    particles.push({ gfx, x, y, vx: Math.cos(angle)*spd, vy: Math.sin(angle)*spd, alpha: 1, decay: randF(0.015, 0.04), color, r });
+  }
+}
+
+function spawnExplosionRing(scene, x, y, radius) {
+  const gfx = scene.add.graphics().setDepth(7);
+  let progress = 0;
+  const interval = setInterval(() => {
+    progress += 0.08;
+    gfx.clear();
+    const alpha = 1 - progress;
+    if (alpha <= 0) { gfx.destroy(); clearInterval(interval); return; }
+    gfx.lineStyle(3 * (1 - progress * 0.5), 0xff00ff, alpha);
+    gfx.strokeCircle(x, y, radius * progress);
+    gfx.lineStyle(2, 0xffffff, alpha * 0.5);
+    gfx.strokeCircle(x, y, radius * progress * 0.6);
+  }, 16);
+}
+
+function shake(frames, intensity) {
+  shakeFrames = Math.max(shakeFrames, frames);
+  shakeIntensity = Math.max(shakeIntensity, intensity);
+}
+</script>
+</body>
+</html>
