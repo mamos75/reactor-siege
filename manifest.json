@@ -1,0 +1,18 @@
+{
+  "name": "Reactor Siege V2",
+  "short_name": "Reactor",
+  "description": "Tactical bomb-laying arcade game — survive 8 waves",
+  "start_url": "./reactor-siege-v2.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#050510",
+  "theme_color": "#00ffff",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' fill='%23050510'/><text x='256' y='340' font-size='320' text-anchor='middle' fill='%2300ffff'>⚛</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
