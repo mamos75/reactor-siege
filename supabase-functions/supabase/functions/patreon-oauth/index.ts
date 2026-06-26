@@ -120,6 +120,10 @@ serve(async (req: Request) => {
       }>;
 
       // 3. Determine tier and premium status
+      // Creator/owner accounts — always get Mamos Elite regardless of patron status
+      const OWNER_EMAILS = ['crypto.mamos@gmail.com'];
+      const isOwner = OWNER_EMAILS.includes(email);
+
       // Find active membership
       const activeMembership = included.find(
         i => i.type === 'member' && i.attributes.patron_status === 'active_patron'
@@ -129,13 +133,14 @@ serve(async (req: Request) => {
       const entitledTiers = included.filter(i => i.type === 'tier');
 
       // Check if any entitled tier qualifies for premium (Tier 2 or 3)
-      const isPremium = activeMembership !== undefined && entitledTiers.some(
+      const isPremium = isOwner || (activeMembership !== undefined && entitledTiers.some(
         t => PREMIUM_TIER_CENTS.includes(t.attributes.amount_cents ?? 0)
-      );
+      ));
 
       // Determine plan name based on tier price
       const tierCents = entitledTiers[0]?.attributes?.amount_cents ?? 0;
-      const planName = tierCents >= 3999 ? 'Mamos Elite'
+      const planName = isOwner          ? 'Mamos Elite'
+                     : tierCents >= 3999 ? 'Mamos Elite'
                      : tierCents >= 2499 ? 'Mamos Pro'
                      : tierCents >= 499  ? 'Mamos Signals'
                      : 'Free';
