@@ -5,9 +5,15 @@ const PATREON_CLIENT_ID     = Deno.env.get('PATREON_CLIENT_ID')!;
 const PATREON_CLIENT_SECRET = Deno.env.get('PATREON_CLIENT_SECRET')!;
 const PATREON_REDIRECT_URI  = Deno.env.get('PATREON_REDIRECT_URI')!;
 const PATREON_CAMPAIGN_ID   = Deno.env.get('PATREON_CAMPAIGN_ID') ?? '';
-const APP_URL               = Deno.env.get('APP_URL') ?? 'https://mtc.mamoscrypto.com';
+const DEFAULT_APP_URL       = Deno.env.get('APP_URL') ?? 'https://mtc.mamoscrypto.com';
 const SUPABASE_URL          = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+
+// Allowed app origins that can be passed as app_url
+const ALLOWED_APP_URLS = [
+  'https://mtc.mamoscrypto.com',
+  'https://trading.mamoscrypto.com',
+];
 
 serve(async (req: Request) => {
   const url = new URL(req.url);
@@ -15,11 +21,21 @@ serve(async (req: Request) => {
   // ── /start ────────────────────────────────────────────────────────────────
   // Redirect the browser to Patreon's OAuth authorize page
   if (url.pathname.endsWith('/start')) {
+    // Allow caller to specify which app to return to after auth
+    const requestedAppUrl = url.searchParams.get('app_url') ?? '';
+    const appUrl = ALLOWED_APP_URLS.includes(requestedAppUrl)
+      ? requestedAppUrl
+      : DEFAULT_APP_URL;
+
+    // Encode app_url in OAuth state so callback knows where to redirect
+    const state = btoa(JSON.stringify({ app_url: appUrl }));
+
     const params = new URLSearchParams({
       response_type: 'code',
       client_id:     PATREON_CLIENT_ID,
       redirect_uri:  PATREON_REDIRECT_URI,
       scope:         'identity identity[email] identity.memberships campaigns.members',
+      state,
     });
 
     return Response.redirect(
@@ -33,8 +49,18 @@ serve(async (req: Request) => {
     const code  = url.searchParams.get('code');
     const error = url.searchParams.get('error');
 
+    // Recover app_url from OAuth state
+    let APP_URL = DEFAULT_APP_URL;
+    try {
+      const stateRaw = url.searchParams.get('state') ?? '';
+      const parsed = JSON.parse(atob(stateRaw));
+      if (parsed?.app_url && ALLOWED_APP_URLS.includes(parsed.app_url)) {
+        APP_URL = parsed.app_url;
+      }
+    } catch { /* ignore malformed state */ }
+
     if (error || !code) {
-      return redirectToApp(`?patreon_error=${encodeURIComponent(error ?? 'no_code')}`);
+      return redirectToApp(APP_URL, `?patreon_error=${encodeURIComponent(error ?? 'no_code')}`);
     }
 
     try {
@@ -54,7 +80,7 @@ serve(async (req: Request) => {
       if (!tokenRes.ok) {
         const body = await tokenRes.text();
         console.error('Patreon token exchange failed:', body);
-        return redirectToApp('?patreon_error=token_exchange_failed');
+        return redirectToApp(APP_URL, '?patreon_error=token_exchange_failed');
       }
 
       const { access_token } = await tokenRes.json();
@@ -79,7 +105,7 @@ serve(async (req: Request) => {
       if (!identityRes.ok) {
         const body = await identityRes.text();
         console.error('Patreon identity fetch failed:', identityRes.status, body);
-        return redirectToApp(`?patreon_error=identity_failed_${identityRes.status}`);
+        return redirectToApp(APP_URL, `?patreon_error=identity_failed_${identityRes.status}`);
       }
 
       const identity = await identityRes.json();
@@ -150,13 +176,15 @@ serve(async (req: Request) => {
 
         if (createErr || !created?.user) {
           console.error('createUser failed:', createErr);
-          return redirectToApp('?patreon_error=create_user_failed');
+          return redirectToApp(APP_URL, '?patreon_error=create_user_failed');
         }
 
         supabaseUserId = created.user.id;
       }
 
-      // 5. Generate a magic link so the browser gets a real session
+      // 5. Create a session via magic link then extract access_token + refresh_token
+      //    so we can redirect directly to the target app with tokens in the URL hash.
+      //    This bypasses Supabase Auth's site_url redirect which always goes to the default.
       const { data: linkData, error: linkErr } = await admin.auth.admin.generateLink({
         type:  'magiclink',
         email,
@@ -165,22 +193,39 @@ serve(async (req: Request) => {
 
       if (linkErr || !linkData?.properties?.hashed_token) {
         console.error('generateLink failed:', linkErr);
-        return redirectToApp('?patreon_error=link_failed');
+        return redirectToApp(APP_URL, '?patreon_error=link_failed');
       }
 
-      // The magic link contains the token — redirect the browser to it
-      // Supabase will swap it for a session then redirect to APP_URL
+      // Follow the magic link server-side to get the session tokens
+      const verifyUrl = `${SUPABASE_URL}/auth/v1/verify?token=${linkData.properties.hashed_token}&type=magiclink&redirect_to=${encodeURIComponent(APP_URL)}`;
+      const verifyRes = await fetch(verifyUrl, {
+        method: 'GET',
+        redirect: 'manual',
+      });
+
+      // Supabase returns a 303 redirect to APP_URL#access_token=...&refresh_token=...
+      const location = verifyRes.headers.get('location') ?? '';
+
+      if (location.includes('access_token')) {
+        // Replace whatever base URL Supabase used with the correct APP_URL
+        // The hash contains: #access_token=...&refresh_token=...&type=bearer&...
+        const hashIndex = location.indexOf('#');
+        const hash = hashIndex !== -1 ? location.slice(hashIndex) : '';
+        return Response.redirect(`${APP_URL}/auth/callback${hash}`, 302);
+      }
+
+      // Fallback: redirect to action_link (may redirect to site_url but better than error)
       return Response.redirect(linkData.properties.action_link, 302);
 
     } catch (err) {
       console.error('patreon-oauth callback error:', err);
-      return redirectToApp('?patreon_error=server_error');
+      return redirectToApp(APP_URL, '?patreon_error=server_error');
     }
   }
 
   return new Response('Not Found', { status: 404 });
 });
 
-function redirectToApp(query = '') {
-  return Response.redirect(`${APP_URL}${query}`, 302);
+function redirectToApp(appUrl: string, query = '') {
+  return Response.redirect(`${appUrl}${query}`, 302);
 }
