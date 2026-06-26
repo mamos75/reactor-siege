@@ -13,6 +13,7 @@ const SUPABASE_SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const ALLOWED_APP_URLS = [
   'https://mtc.mamoscrypto.com',
   'https://trading.mamoscrypto.com',
+  'https://options-analyzer.mamoscrypto.com',
 ];
 
 serve(async (req: Request) => {
