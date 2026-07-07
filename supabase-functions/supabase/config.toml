@@ -427,3 +427,8 @@ entrypoint = "./functions/lsr-collector/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/market-state-alert/index.ts"
+
+[functions.patreon-oauth]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/patreon-oauth/index.ts"
